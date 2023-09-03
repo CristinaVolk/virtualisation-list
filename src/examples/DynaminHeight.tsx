@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState} from "react";
+import {useCallback, useEffect, useInsertionEffect, useLayoutEffect, useMemo, useRef, useState} from "react";
 import {faker} from "@faker-js/faker";
 
 
@@ -7,7 +7,6 @@ type Item = {
 	text: string
 }
 type Key = string | number;
-
 
 interface UseVirtualScrollProps {
 	itemsCount: number,
@@ -29,7 +28,6 @@ const items: Item[] = Array.from({ length: 10_000 }, (_, index) => ({
 	text: faker.lorem.text(),
 }));
 
-// const itemHeight = 40;
 const containerHeight = 600;
 const DEFAULT_OVERSCAN = 3;
 const DEFAULT_SCROLLING_DELAY = 100;
@@ -39,6 +37,15 @@ function validateProps(props: UseVirtualScrollProps){
 	if (!itemHeight && !estimateItemHeight){
 		throw new Error(`you must pass either "itemHeight" or "estimateItemHeight" prop`)
 	}
+}
+
+function useLatest<T>(value: T) {
+	const valueRef = useRef(value);
+	useInsertionEffect(() => {
+		console.log('useInsertionEffect');
+		valueRef.current = value;
+	}, []);
+	return valueRef;
 }
 
 export function useVirtualScroll(props: UseVirtualScrollProps) {
@@ -182,21 +189,76 @@ export function useVirtualScroll(props: UseVirtualScrollProps) {
 		};
 	}, [scrollTop, overscan, listHeight, measurementCache, estimateItemHeight, itemsCount, itemHeight]);
 
-	const measureElement = useCallback((element: Element | null) => {
-		if (!element) {
-			return;
-		}
+	const latestData = useLatest({
+		measurementCache,
+		getItemKey,
+		allItems,
+		getScrollElement,
+		scrollTop,
+	});
 
-		const indexAttribute = element.getAttribute('data-index') || '';
-		const index = parseInt(indexAttribute, 10);
-		if (Number.isNaN(index)) {
-			console.error('dynamic elements must ahve a valid `data-index` attribute');
-			return;
-		}
-		const size = element?.getBoundingClientRect();
-		const key = getItemKey(index);
-		setMeasurementCache(cache => ({...cache, [key]: size.height}))
-	},[getItemKey])
+	const measureElementInner = useCallback(
+		(
+			element: Element | null,
+			resizeObserver: ResizeObserver,
+			entry?: ResizeObserverEntry
+		) => {
+			if (!element) {
+				return;
+			}
+
+			if (!element.isConnected) {
+				resizeObserver.unobserve(element);
+				return;
+			}
+
+			const indexAttribute = element.getAttribute('data-index') || '';
+			const index = parseInt(indexAttribute, 10);
+			if (Number.isNaN(index)) {
+				console.error('dynamic elements must have a valid `data-index` attribute');
+				return;
+			}
+
+			const {measurementCache, getItemKey, allItems, getScrollElement, scrollTop} = latestData.current;
+			const key = getItemKey(index);
+			const isResize = Boolean(entry);
+
+			resizeObserver.observe(element);
+
+			if (!isResize && typeof measurementCache[key] === "number") {
+				return;
+			}
+
+			const height = entry?.borderBoxSize[0].blockSize ?? element.getBoundingClientRect().height;
+			if (measurementCache[key] === height) {
+				return;
+			}
+
+			const item = allItems[index]!;
+			const delta = height - item.height;
+
+			if (delta !== 0 && scrollTop > item.offsetTop) {
+				const element = getScrollElement();
+				if (element) {
+					element.scrollBy(0, delta);
+				}
+			}
+
+			setMeasurementCache(cache => ({...cache, [key]: height}))
+		}, []);
+
+	const itemsResizeObserver = useMemo(() => {
+		const resizeObserver = new ResizeObserver((entries) => {
+			entries.forEach((entry) => {
+				measureElementInner(entry.target, resizeObserver, entry);
+			})
+		});
+		return resizeObserver;
+	}, [latestData]);
+
+	const measureElement = useCallback((element: Element | null) => {
+		measureElementInner(element, itemsResizeObserver);
+	},[itemsResizeObserver]);
 
 	return {
 		isScrolling,
